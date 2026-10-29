@@ -1,0 +1,11 @@
+node_modules/
+frontend/dist/
+build/bin/
+*.db
+*.db-shm
+*.db-wal
+*.exe
+.local/
+*.log
+frontend/wailsjs/
+frontend/playwright-report/

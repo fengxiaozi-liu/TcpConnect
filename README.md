@@ -1,0 +1,97 @@
+# TcpConnect
+
+本地 TCP / FIX 桌面调试工作台。Go + Vue 3，Wails 桌面窗口，按 DDD 划分通信、调试与 FIX 协议职责。参考 Apifox 的服务树、请求标签、脚本编辑与响应面板。
+
+## 运行
+
+Windows 可直接打开 `build/bin/TcpConnect.exe`。需要 Microsoft Edge WebView2 Runtime；当前开发机已安装。服务配置、请求、脚本、函数和字典默认保存在 `%APPDATA%/TcpConnect/workspace.db`，无需启动独立后端。
+
+开发要求：Go 1.26+、Node.js 22+、npm、Wails v2.11；Windows 需要 GCC 与 WebView2。
+
+```powershell
+go install github.com/wailsapp/wails/v2/cmd/wails@v2.11.0
+npm --prefix frontend ci
+wails dev
+```
+
+生产构建：
+
+```powershell
+wails build -skipbindings
+```
+
+浏览器模式（与桌面使用同一应用层，只监听本机）：
+
+```powershell
+npm --prefix frontend run build
+go run . --web --port 17839 --data-dir .local/dev
+```
+
+访问 `http://127.0.0.1:17839`。`--data-dir` 可在桌面或浏览器模式覆盖配置目录。浏览器模式与桌面可使用不同目录进行隔离测试。
+
+## 通用 TCP
+
+1. 左侧 `+` 新建 TCP 服务，配置地址和端口。
+2. 选择接收规则：原始接收块、分隔符、定长、ASCII 长度头，或直接从下拉框的“自定义接收完成判断函数”分组选择已创建的函数。服务设置中可进入函数管理，新建或编辑后点击“绑定并返回服务设置”，最后保存服务并重新连接。
+3. 添加请求，编辑 UTF-8 / HEX / Base64 报文，连接后发送。
+4. 请求中设置前后置 JavaScript，以及请求、返回处理函数。
+5. 下方查看收发、原始字节、脚本日志与定时任务。连接只在手动断开、对端关闭或协议错误时释放。
+
+“每次收到数据即展示”保留 TCP 块边界，不能当成业务消息边界。分隔符模式包括分隔符；ASCII 长度头固定宽度、十进制、存储包体字节数，头本身不计入包体长度。
+
+## FIX 协议
+
+1. “协议”页导入 QuickFIX XML 字典，目前支持 FIX 4.4。导入后自动创建同名 FIX 服务，并按每个消息定义生成命名模板，例如 `Logon (A)`、`NewOrderSingle (D)`；提供的 FIX44.xml 生成 181 个模板。
+2. 在服务设置中确认地址、SenderCompID、TargetCompID、心跳与登录选项。导入服务默认连接 `127.0.0.1:9878`。从已有字典新建 FIX 服务，同样生成全部消息模板。
+3. 左侧点击消息即可打开对应字段、枚举、组件与嵌套重复组表单。服务右侧文档图标“补全消息模板”可给旧服务添加缺失类型，保留已有名称、字段值和脚本；`+` 可选择消息类型，单独创建更多测试用例。
+4. 完成必填字段后发送。默认自动生成 `8/9/35/34/49/52/56/10`；`52` 使用 UTC，`9/10` 按 UTF-8 字节计算。
+5. 接收按 BodyLength 拆帧并校验 CheckSum；字段视图保留重复 Tag，并显示重复组路径和枚举含义。
+
+内置 `assets/fixspec/FIX44.xml` 是本次提供的业务字典，181 种消息、26 个组件、1262 个字段，包含自定义业务消息。它仅用于首次初始化示例；以后导入的字典独立保存，不要求重新编译程序。
+
+左侧服务和消息右侧的垃圾桶提供删除入口，确认后保存。删除服务会断开其连接、停止定时任务并删除所属消息；字典继续保留在协议库，需要单独删除。删除消息仅移除该用例。业务必填值仍需填写，模板不推测账号、订单等业务数据。
+
+### 会话行为
+
+- TCP 连接和 FIX 登录分别显示。服务可设置自动登录，也可手动发送 Logon 表单。
+- 自动登录使用服务的心跳间隔，手动登录使用表单的 HeartBtInt；登录确认后使用对端返回的间隔维护心跳（支持 1～3600 秒），并回应 TestRequest（复制 TestReqID）。定时业务发送仍使用同一连接和序号。
+- 发送序号与接收期望独立管理；接收缺口触发 ResendRequest。当前连接支持最近 1000 条、最多 16 MiB 发送历史的重发，管理消息以 GapFill 补齐。
+- 每次新连接从序号 1 开始。此版本不提供跨重启的 FIX 序号与重发日志恢复，适用于本地联调；对端应使用匹配的重置策略。
+- 原始报文模式原样发送（除显式选中的请求处理函数外），不维护序号与头尾，用于负例。它会影响正常会话，应另建测试连接。
+- 字典声明的必填/类型/枚举自动校验；XML 未描述的业务条件、默认值和请求响应配对由用例及脚本补充。
+- FIX 字段解析以 SOH 分隔，当前不支持 DATA 字段内嵌 SOH 的二进制扩展；通用 TCP 的 HEX/Base64 收发可保留任意字节。
+
+## 脚本与数据
+
+详见 [脚本 API](docs/scripting.md)。所有日志和异常在“脚本与事件”页显示。定时任务可单独停止，连接断开后全部自动停止。脚本为本机可信用户编写，在 Goja 中执行；不提供 Node.js、文件系统、任意 HTTP 或系统命令访问。执行超时是 CPU 保护，不是独立进程内存沙盒。
+
+服务、处理函数的修改在重新连接后生效；请求内容与前后置脚本在下次发送时生效。配置手动保存，发送前自动保存。“另存用例”复制请求，修改名称后保存即可。导入工作区会替换当前配置，需要先断开所有连接。
+
+凭据与脚本随工作区存储在本机 SQLite 中，导出 JSON 也包含这些配置；原始报文可含凭据。不会主动上传数据。收发历史仅保存在内存，最多 500 条且总载荷约 16 MiB；重启后清空，配置保持。
+
+## 本机验收
+
+```powershell
+go run ./cmd/echo -port 9879
+```
+
+工具选择“本地 TCP / Echo 回显”，连接并发送即可。FIX 可使用内置模拟服务：
+
+```powershell
+go run ./cmd/fixmock -port 9878
+```
+
+选择“FIX 4.4 / 登录 Logon”，连接并发送，等待状态“FIX 已登录”。Sender 为 `FixClient`、Target 为 `Fix`。模拟服务接受订单并返回 NEW 状态回报，不执行真实交易。
+
+## 验证命令
+
+```powershell
+go test ./...
+go test -race ./internal/...
+go vet ./...
+npm --prefix frontend test
+npm --prefix frontend run build
+npm --prefix frontend run test:e2e
+```
+
+E2E 使用本机 Edge 的 headless 模式与真实本机 TCP/FIX 模拟对端，每轮启动独立的 `.local/e2e-<时间戳>` 工作区；测试截图和失败 trace 在 `.local` 下。运行前完成前端构建。手动验收见 [验收说明](docs/acceptance.md)，分层见 [架构](docs/architecture.md)。
