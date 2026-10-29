@@ -25,11 +25,18 @@ func (b *Bridge) ClearEvents()                            { b.Workbench.ClearEve
 func (b *Bridge) ImportDictionary(name, xml string) (*fix.Dictionary, error) {
 	return b.Workbench.ImportDictionary(name, xml)
 }
-func (b *Bridge) ImportProtocol(name, xml string) (string, error) {
-	return b.Workbench.ImportProtocol(name, xml)
+func (b *Bridge) PreviewDictionary(xml string) (*fix.Dictionary, error) {
+	return fix.ParseDictionary([]byte(xml))
 }
-func (b *Bridge) SaveService(s domain.Service) (int, error) { return b.Workbench.SaveService(s) }
-func (b *Bridge) GenerateMessages(id string) (int, error)   { return b.Workbench.GenerateMessages(id) }
+func (b *Bridge) ImportProtocol(name, xml string, types []string) (string, error) {
+	return b.Workbench.ImportProtocol(name, xml, types)
+}
+func (b *Bridge) SaveService(s domain.Service, types []string) (int, error) {
+	return b.Workbench.SaveService(s, types)
+}
+func (b *Bridge) GenerateMessages(id string, types []string) (int, error) {
+	return b.Workbench.GenerateMessages(id, types)
+}
 func (b *Bridge) CreateMessage(id, msgType string) (domain.Request, error) {
 	return b.Workbench.CreateMessage(id, msgType)
 }
@@ -102,6 +109,7 @@ func (b *Bridge) Handler(assets fs.FS, host string) http.Handler {
 		var after uint64
 		var req domain.Request
 		var workspace domain.Workspace
+		var messageTypes []string
 		switch input.Method {
 		case "Snapshot", "Status":
 			if len(input.Args) > 0 {
@@ -125,11 +133,17 @@ func (b *Bridge) Handler(assets fs.FS, host string) http.Handler {
 		case "SaveService":
 			var svc domain.Service
 			if err = arg(0, &svc); err == nil {
-				result, err = b.SaveService(svc)
+				err = arg(1, &messageTypes)
+			}
+			if err == nil {
+				result, err = b.SaveService(svc, messageTypes)
 			}
 		case "GenerateMessages":
 			if err = arg(0, &id); err == nil {
-				result, err = b.GenerateMessages(id)
+				err = arg(1, &messageTypes)
+			}
+			if err == nil {
+				result, err = b.GenerateMessages(id, messageTypes)
 			}
 		case "CreateMessage":
 			if err = arg(0, &id); err == nil {
@@ -163,13 +177,19 @@ func (b *Bridge) Handler(assets fs.FS, host string) http.Handler {
 			if err = arg(0, &id); err == nil {
 				result, err = b.Dictionary(id)
 			}
+		case "PreviewDictionary":
+			if err = arg(0, &data); err == nil {
+				result, err = b.PreviewDictionary(data)
+			}
 		case "ImportDictionary", "ImportProtocol":
 			if err = arg(0, &name); err == nil {
 				err = arg(1, &data)
 			}
 			if err == nil {
 				if input.Method == "ImportProtocol" {
-					result, err = b.ImportProtocol(name, data)
+					if err = arg(2, &messageTypes); err == nil {
+						result, err = b.ImportProtocol(name, data, messageTypes)
+					}
 				} else {
 					result, err = b.ImportDictionary(name, data)
 				}

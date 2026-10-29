@@ -24,7 +24,12 @@
 
 - [✅️] REVIEW-014 [P2 | 完成度 | App.vue] 接收规则只展示抽象的“自定义判断函数”，实际绑定入口隐藏。规则下拉框直接列出 frame 类函数并按 ID 绑定；提供管理往返、草稿保留和绑定提示，切换内置规则解除关联；保持已选函数，避免类型切换监听器误选首个函数。
 
+- [✅️] REVIEW-015 [P2 | 正确性 | App.vue] 搜索只过滤服务，服务下仍渲染全部消息。计算过滤后的消息视图并渲染匹配项，支持消息类型、大小写/空格规范化、自动展开、无结果和清除；全量数据仍用于保存、模板和删除计数。
+
+- [✅️] REVIEW-016 [P2 | 完成度 | protocols.go / Bridge / MessagePicker.vue / App.vue] XML 导入和新建服务无接口选择，直接生成全部模板。改为只读预览、默认空选、按明确类型确认；补充模板复用同一选择窗口，完整字典保留，空/无效选择后端拒绝，重复类型去重。已有项禁选且通过 aria-disabled 声明，成功预览清除此前 XML 错误提示。
+
 ## 审查模式与上下文
+
 
 - 模式：Feature review。
 - 范围：空 Git 仓库上的全部新增应用、前后端、字典、构建配置、测试及文档；包括完整交付内容，非仅最后一次局部修改。
@@ -123,3 +128,29 @@ DDD 领域不依赖界面、SQL 或网络实现；TCP 公共通信不加载 FIX 
 - 验证：Go 全包测试及 go vet 通过；TypeScript/Vite 构建通过（既有 Monaco 体积提示）；Playwright 4 个场景通过（28.4 秒），含新增真实 TCP 自定义函数分帧。本轮无并发运行时代码修改。
 - 交付：`wails build -s -skipbindings -o TcpConnect-updated.exe` 成功。当前用户正在运行 canonical 程序，保留其进程与配置，交付 `build/bin/TcpConnect-updated.exe`；关闭旧窗口后打开更新程序，保存服务并重新连接使规则生效。
 - 结论：通过，无未解决 finding。完整新流程使用隔离浏览器工作区验证，未改动用户服务绑定。
+
+## 验收修正复审：消息树搜索
+
+模式：Feature review，使用既有 speckit-code-review 流程及本项目 AGENTS.md。对比 `.local/phase6-before` 审查 App.vue 完整差异，并核查新增 Playwright 搜索场景、README/验收说明及 Phase 6 需求和任务。项目为独立 Wails 应用，无适配的 Kratos skill。
+
+- 完成度：通过。服务/消息名及消息类型搜索、规范化关键词、自动展开、结果计数、无结果提示和清除入口已实现。
+- 正确性：通过。搜索 Logon 只显示匹配消息，服务名命中展示该服务全部消息；空白搜索等同清空，已有编辑和选中内容保留。过滤视图不修改原始工作区，保存与删除计数仍使用全量数据，搜索中保存后重启保持 181 个模板。
+- 架构与规范：通过。仅 Vue 展示及验收文档变更，复用原有数据结构，不改变应用、存储、TCP/FIX 运行时及原 FIXService。
+- 性能：通过。过滤结果使用 computed 缓存，仅相关状态变化时重算；受已有工作区数量限制，实际 181 消息字典的输入和恢复已验证。
+- 安全：通过。搜索只在内存匹配文本，使用 Vue 文本渲染；没有新增网络传输、脚本执行或持久数据操作。
+- 验证：Go 全包测试、go vet、前端 3 个单元测试、TypeScript/Vite 构建通过；Playwright 5 场景通过（32.3 秒），新场景覆盖收起后的自动展开、大小写/空格、消息类型、无结果、清除与保存刷新。截图 `.local/screenshots/message-search.png` 已检查。
+- 交付：Wails Windows 构建成功，`build/bin/TcpConnect.exe` 及 `TcpConnect-updated.exe` 更新；未终止用户进程或改动用户配置。构建仍有既有 Monaco 包体提示。
+- 结论：通过，无未解决 finding。
+
+## 验收修正复审：按选择导入接口
+
+模式：Feature review，继续使用 speckit-code-review，依据独立 Wails/DDD 项目的 AGENTS.md。审查 Phase 7 的 spec/plan/tasks、完整前后端差异、全部新增 MessagePicker、应用回归和 E2E、README/架构/验收文档；已有代码与 `.local/phase7-before` 对比。此项目无对应 Kratos 专属适配，不修改原 FIXService。
+
+- 完成度：通过。XML 解析后先选择接口；默认未选，支持名称/类型搜索、跨搜索多选、全选当前结果、清空及数量展示。导入、新字典服务和既有服务补充均按选中类型创建；取消新服务选择返回原配置草稿。
+- 正确性：通过。PreviewDictionary 不接触仓储，确认前取消或 XML 错误不新增数据。应用层要求至少一项、校验每个类型并去重；完整字典、服务及选中模板一次保存，失败无半成品。已有模板保留，旧工作区结构兼容。导入失败保留选择可重试，成功预览不再显示前一次 XML 错误。禁选项使用实际 disabled 及显式 aria-disabled。
+- 架构与规范：通过。领域 XML 解析独立，消息选择规则由应用层执行；Wails/HTTP Bridge 同步传递类型数组，Vue 三个入口复用选择组件，无领域/基础设施依赖界面。
+- 性能：通过本次 181 消息的本地联调范围。过滤使用 computed 和集合去重，XML、工作区数量上限继续生效；不增加后台轮询。未进行超大字典界面压力测试。
+- 安全：通过。无新增外部通信；预览与提交沿用 Host/Origin/JSON、XML 体积/递归和引用校验。界面文本渲染，选择不执行脚本，取消不写用户工作区。
+- 验证：`go test ./...`、`go test -race ./internal/...`、`go vet ./...` 通过；前端 3 个单元测试、TypeScript/Vite 构建通过。Playwright 6 个完整场景通过（48.4 秒），最终错误提示修正后选择导入场景再次通过（7.4 秒）。覆盖 181 类型中仅选 A/D、完整字典、仅补充 Heartbeat、单接口新服务、取消、无效 XML、导入失败重试及刷新恢复；全量模板测试现在显式全选。
+- 交付：`wails build -s -skipbindings -o TcpConnect-updated.exe` 成功。当前原程序仍在运行，保留用户进程和数据，交付 `build/bin/TcpConnect-updated.exe`。既有 Monaco 包体提示保持。
+- 结论：通过，无未解决 finding。新增流程通过隔离的真实 HTTP/浏览器工作区验证；原生窗口未再次操作实际导入。

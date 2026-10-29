@@ -8,9 +8,13 @@ import (
 	"tcpconnect/internal/domain/fix"
 )
 
-// ImportProtocol persists the dictionary, service and all message templates together.
-func (w *Workbench) ImportProtocol(name, xml string) (string, error) {
+// ImportProtocol persists the complete dictionary and only the selected templates together.
+func (w *Workbench) ImportProtocol(name, xml string, messageTypes []string) (string, error) {
 	d, err := fix.ParseDictionary([]byte(xml))
+	if err != nil {
+		return "", err
+	}
+	messages, err := selectMessages(d, messageTypes)
 	if err != nil {
 		return "", err
 	}
@@ -25,7 +29,7 @@ func (w *Workbench) ImportProtocol(name, xml string) (string, error) {
 	}
 	s := domain.Service{ID: ID(), Name: serviceName, Protocol: "fix", Host: "127.0.0.1", Port: 9878, TimeoutMS: 5000, DictionaryID: dictionaryID, Sender: "FixClient", Target: "Fix", Heartbeat: 30, ResetOnLogon: true}
 	v.Services = append(v.Services, s)
-	appendMessages(&v, s, d)
+	appendMessages(&v, s, messages)
 	if err = w.commitProtocolLocked(v); err != nil {
 		return "", err
 	}
@@ -33,7 +37,7 @@ func (w *Workbench) ImportProtocol(name, xml string) (string, error) {
 }
 
 // SaveService creates FIX templates when adding a new service.
-func (w *Workbench) SaveService(s domain.Service) (int, error) {
+func (w *Workbench) SaveService(s domain.Service, messageTypes []string) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	v := clone(w.workspace)
@@ -53,7 +57,11 @@ func (w *Workbench) SaveService(s domain.Service) (int, error) {
 			if err != nil {
 				return 0, err
 			}
-			count = appendMessages(&v, s, d)
+			messages, err := selectMessages(d, messageTypes)
+			if err != nil {
+				return 0, err
+			}
+			count = appendMessages(&v, s, messages)
 		}
 	}
 	if err := w.commitProtocolLocked(v); err != nil {
@@ -63,7 +71,7 @@ func (w *Workbench) SaveService(s domain.Service) (int, error) {
 }
 
 // GenerateMessages fills missing message types without changing saved cases.
-func (w *Workbench) GenerateMessages(serviceID string) (int, error) {
+func (w *Workbench) GenerateMessages(serviceID string, messageTypes []string) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	v := clone(w.workspace)
@@ -75,7 +83,11 @@ func (w *Workbench) GenerateMessages(serviceID string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	count := appendMessages(&v, s, d)
+	messages, err := selectMessages(d, messageTypes)
+	if err != nil {
+		return 0, err
+	}
+	count := appendMessages(&v, s, messages)
 	if err = w.commitProtocolLocked(v); err != nil {
 		return 0, err
 	}
@@ -122,7 +134,27 @@ func workspaceDictionary(v domain.Workspace, id string) (*fix.Dictionary, error)
 	}
 	return nil, fmt.Errorf("字典不存在")
 }
-func appendMessages(v *domain.Workspace, s domain.Service, d *fix.Dictionary) int {
+func selectMessages(d *fix.Dictionary, types []string) ([]fix.Message, error) {
+	if len(types) == 0 {
+		return nil, fmt.Errorf("请至少选择一个消息接口")
+	}
+	selected := make(map[string]bool, len(types))
+	for _, typ := range types {
+		if _, ok := d.Message(typ); !ok {
+			return nil, fmt.Errorf("消息类型未定义: %s", typ)
+		}
+		selected[typ] = true
+	}
+	var messages []fix.Message
+	for _, m := range d.Messages {
+		if selected[m.Type] {
+			messages = append(messages, m)
+		}
+	}
+	return messages, nil
+}
+
+func appendMessages(v *domain.Workspace, s domain.Service, messages []fix.Message) int {
 	seen := map[string]bool{}
 	for _, r := range v.Requests {
 		if r.ServiceID == s.ID {
@@ -130,7 +162,7 @@ func appendMessages(v *domain.Workspace, s domain.Service, d *fix.Dictionary) in
 		}
 	}
 	count := 0
-	for _, m := range d.Messages {
+	for _, m := range messages {
 		if seen[m.Type] {
 			continue
 		}

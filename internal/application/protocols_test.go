@@ -8,6 +8,7 @@ import (
 
 	"tcpconnect/internal/application"
 	"tcpconnect/internal/domain"
+	"tcpconnect/internal/domain/fix"
 	"tcpconnect/internal/infrastructure/runtime"
 	"tcpconnect/internal/infrastructure/storage"
 )
@@ -27,7 +28,15 @@ func TestImportedProtocolCreatesPersistentTemplates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := app.ImportProtocol("CUSTOM44.xml", string(xml))
+	d, err := fix.ParseDictionary(xml)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allTypes := make([]string, 0, len(d.Messages))
+	for _, m := range d.Messages {
+		allTypes = append(allTypes, m.Type)
+	}
+	id, err := app.ImportProtocol("CUSTOM44.xml", string(xml), allTypes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,10 +74,10 @@ func TestImportedProtocolCreatesPersistentTemplates(t *testing.T) {
 	if err = app.Save(v); err != nil {
 		t.Fatal(err)
 	}
-	if count, err := app.GenerateMessages(id); err != nil || count != 1 {
+	if count, err := app.GenerateMessages(id, []string{"D"}); err != nil || count != 1 {
 		t.Fatalf("fill: %d %v", count, err)
 	}
-	if count, err := app.GenerateMessages(id); err != nil || count != 0 {
+	if count, err := app.GenerateMessages(id, []string{"D"}); err != nil || count != 0 {
 		t.Fatalf("duplicate fill: %d %v", count, err)
 	}
 	for _, r := range app.Snapshot(0).Workspace.Requests {
@@ -91,11 +100,11 @@ func TestImportedProtocolCreatesPersistentTemplates(t *testing.T) {
 	svc := v.Services[0]
 	svc.ID = "second"
 	svc.Name = "Second"
-	if count, err := app.SaveService(svc); err != nil || count != 181 {
+	if count, err := app.SaveService(svc, allTypes); err != nil || count != 181 {
 		t.Fatalf("new service templates: %d %v", count, err)
 	}
 	svc.Port = 9877
-	if count, err := app.SaveService(svc); err != nil || count != 0 {
+	if count, err := app.SaveService(svc, nil); err != nil || count != 0 {
 		t.Fatalf("edit service regenerated: %d %v", count, err)
 	}
 	app.Close()
@@ -123,11 +132,79 @@ func TestProtocolImportFailureIsAtomic(t *testing.T) {
 	}
 	defer app.Close()
 	xml := `<fix type="FIX" major="4" minor="4"><messages><message name="Custom" msgtype="U"><field name="Value" required="Y"/></message></messages><fields><field number="5000" name="Value" type="STRING"/></fields></fix>`
-	if _, err = app.ImportProtocol("custom.xml", xml); err == nil {
+	if _, err = app.ImportProtocol("custom.xml", xml, []string{"U"}); err == nil {
 		t.Fatal("failed storage accepted")
 	}
 	v := app.Snapshot(0).Workspace
 	if len(v.Services)+len(v.Requests)+len(v.Dictionaries) != 0 {
 		t.Fatal("partial import was retained")
+	}
+}
+
+func TestSelectedMessagesOnlyAndInvalidSelectionsAreAtomic(t *testing.T) {
+	repo, err := storage.Open(filepath.Join(t.TempDir(), "workspace.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := application.New(repo, runtime.Factory{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	xml, err := os.ReadFile("../../assets/fixspec/FIX44.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, types := range [][]string{nil, {}, {"A", "UNKNOWN"}} {
+		if _, err = app.ImportProtocol("selected.xml", string(xml), types); err == nil {
+			t.Fatal("invalid selection accepted")
+		}
+	}
+	if v := app.Snapshot(0).Workspace; len(v.Services)+len(v.Dictionaries)+len(v.Requests) != 0 {
+		t.Fatal("invalid import left partial data")
+	}
+	id, err := app.ImportProtocol("selected.xml", string(xml), []string{"A", "D", "A"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := app.Snapshot(0).Workspace
+	if len(v.Requests) != 2 {
+		t.Fatalf("selection created %d templates, want 2", len(v.Requests))
+	}
+	for _, r := range v.Requests {
+		if r.MessageType != "A" && r.MessageType != "D" {
+			t.Fatalf("unselected type %s", r.MessageType)
+		}
+	}
+	d, err := app.Dictionary(v.Services[0].DictionaryID)
+	if err != nil || len(d.Messages) != 181 {
+		t.Fatal("selected import truncated the protocol dictionary")
+	}
+	svc := v.Services[0]
+	svc.ID = "selected-service"
+	if _, err = app.SaveService(svc, nil); err == nil {
+		t.Fatal("new FIX service accepted no selection")
+	}
+	if count, err := app.SaveService(svc, []string{"0"}); err != nil || count != 1 {
+		t.Fatalf("new service selected templates: %d %v", count, err)
+	}
+	before, _ := app.Export()
+	for _, types := range [][]string{nil, {"0", "UNKNOWN"}} {
+		if _, err = app.GenerateMessages(id, types); err == nil {
+			t.Fatal("invalid supplement accepted")
+		}
+	}
+	after, _ := app.Export()
+	if before != after {
+		t.Fatal("invalid supplement changed saved records")
+	}
+	if count, err := app.GenerateMessages(id, []string{"0", "0", "A"}); err != nil || count != 1 {
+		t.Fatalf("selected supplement: %d %v", count, err)
+	}
+	if count, err := app.GenerateMessages(id, []string{"0"}); err != nil || count != 0 {
+		t.Fatalf("selected supplement duplicated: %d %v", count, err)
+	}
+	if len(app.Snapshot(0).Workspace.Requests) != 4 {
+		t.Fatal("unselected templates added")
 	}
 }
