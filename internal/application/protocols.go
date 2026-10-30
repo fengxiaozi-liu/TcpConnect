@@ -27,7 +27,7 @@ func (w *Workbench) ImportProtocol(name, xml string, messageTypes []string) (str
 	if serviceName == "" {
 		serviceName = d.Version
 	}
-	s := domain.Service{ID: ID(), Name: serviceName, Protocol: "fix", Host: "127.0.0.1", Port: 9878, TimeoutMS: 5000, DictionaryID: dictionaryID, Sender: "FixClient", Target: "Fix", Heartbeat: 30, ResetOnLogon: true}
+	s := domain.Service{ID: ID(), Name: serviceName, Protocol: "fix", Host: "127.0.0.1", Port: 9878, TimeoutMS: 5000, DictionaryID: dictionaryID, FIXVersion: d.Version, Sender: "FixClient", Target: "Fix", Heartbeat: 30, ResetOnLogon: true}
 	v.Services = append(v.Services, s)
 	appendMessages(&v, s, messages)
 	if err = w.commitProtocolLocked(v); err != nil {
@@ -36,7 +36,7 @@ func (w *Workbench) ImportProtocol(name, xml string, messageTypes []string) (str
 	return s.ID, nil
 }
 
-// SaveService creates FIX templates when adding a new service.
+// SaveService persists configuration; explicitly selected templates are optional for new services.
 func (w *Workbench) SaveService(s domain.Service, messageTypes []string) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -52,8 +52,8 @@ func (w *Workbench) SaveService(s domain.Service, messageTypes []string) (int, e
 	count := 0
 	if !found {
 		v.Services = append(v.Services, s)
-		if s.Protocol == "fix" {
-			d, err := workspaceDictionary(v, s.DictionaryID)
+		if s.Protocol == "fix" && len(messageTypes) > 0 {
+			d, err := serviceDictionary(v, s)
 			if err != nil {
 				return 0, err
 			}
@@ -79,7 +79,7 @@ func (w *Workbench) GenerateMessages(serviceID string, messageTypes []string) (i
 	if err != nil {
 		return 0, err
 	}
-	d, err := workspaceDictionary(v, s.DictionaryID)
+	d, err := serviceDictionary(v, s)
 	if err != nil {
 		return 0, err
 	}
@@ -102,7 +102,7 @@ func (w *Workbench) CreateMessage(serviceID, msgType string) (domain.Request, er
 	if err != nil {
 		return domain.Request{}, err
 	}
-	d, err := workspaceDictionary(v, s.DictionaryID)
+	d, err := serviceDictionary(v, s)
 	if err != nil {
 		return domain.Request{}, err
 	}
@@ -126,13 +126,25 @@ func workspaceFIXService(v domain.Workspace, id string) (domain.Service, error) 
 	}
 	return domain.Service{}, fmt.Errorf("FIX 服务不存在")
 }
-func workspaceDictionary(v domain.Workspace, id string) (*fix.Dictionary, error) {
+func serviceDictionary(v domain.Workspace, s domain.Service) (*fix.Dictionary, error) {
+	if s.DictionaryID == "" {
+		return fix.ResolveDictionary(s.FIXVersion, nil)
+	}
 	for _, d := range v.Dictionaries {
-		if d.ID == id {
-			return fix.ParseDictionary([]byte(d.XML))
+		if d.ID == s.DictionaryID {
+			return fix.ResolveDictionary(s.FIXVersion, []byte(d.XML))
 		}
 	}
-	return nil, fmt.Errorf("字典不存在")
+	return nil, fmt.Errorf("自定义字典不存在")
+}
+func (w *Workbench) ServiceDictionary(id string) (*fix.Dictionary, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	s, err := workspaceFIXService(w.workspace, id)
+	if err != nil {
+		return nil, err
+	}
+	return serviceDictionary(w.workspace, s)
 }
 func selectMessages(d *fix.Dictionary, types []string) ([]fix.Message, error) {
 	if len(types) == 0 {

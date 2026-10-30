@@ -102,6 +102,9 @@ func (s *Session) initVM() error {
 		name := call.Argument(0).String()
 		ms := call.Argument(1).ToInteger()
 		fn, ok := goja.AssertFunction(call.Argument(2))
+		if strings.HasPrefix(name, "request/") {
+			panic(vm.NewGoError(fmt.Errorf("request/为请求周期任务保留名称前缀")))
+		}
 		if !ok || name == "" || ms < 50 || ms > 86400000 {
 			panic(vm.NewGoError(fmt.Errorf("定时器需要名称、50..86400000 毫秒、回调函数")))
 		}
@@ -109,7 +112,7 @@ func (s *Session) initVM() error {
 			panic(vm.NewGoError(fmt.Errorf("最多 32 个定时任务")))
 		}
 		s.stopTask(name)
-		t := &task{stop: make(chan struct{}), request: s.active}
+		t := &task{stop: make(chan struct{}), request: s.active, kind: "script", intervalMS: ms}
 		s.tasks[name] = t
 		s.emit("task", fmt.Sprintf("启动定时任务 %s (%dms)", name, ms))
 		go func() {
@@ -128,7 +131,6 @@ func (s *Session) initVM() error {
 					previous := s.active
 					s.active = t.request
 					e := s.run(func() error { _, err := fn(goja.Undefined()); return err })
-					s.active = previous
 					if e != nil {
 						s.emit("error", "定时任务 "+name+": "+e.Error())
 						s.stopTask(name)
@@ -136,6 +138,7 @@ func (s *Session) initVM() error {
 					if once {
 						s.stopTask(name)
 					}
+					s.active = previous
 					s.mu.Unlock()
 					if once || e != nil {
 						return

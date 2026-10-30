@@ -48,10 +48,10 @@ func (w *Workbench) Emit(e domain.Event) {
 		e.Time = time.Now()
 	}
 	w.events = append(w.events, e)
-	w.eventBytes += len(e.Raw) + len(e.Text) + len(e.Hex) + len(e.Base64)
+	w.eventBytes += eventSize(e)
 	for len(w.events) > 1 && (len(w.events) > 500 || w.eventBytes > 16<<20) {
 		old := w.events[0]
-		w.eventBytes -= len(old.Raw) + len(old.Text) + len(old.Hex) + len(old.Base64)
+		w.eventBytes -= eventSize(old)
 		w.events[0] = domain.Event{}
 		w.events = w.events[1:]
 	}
@@ -95,7 +95,7 @@ func validateWorkspace(v domain.Workspace) error {
 	}
 	ids := map[string]bool{}
 	services := map[string]bool{}
-	dicts := map[string]bool{}
+	definitions := map[string]*fix.Dictionary{}
 	functions := map[string]string{}
 	add := func(id string) error {
 		if id == "" || ids[id] {
@@ -111,7 +111,6 @@ func validateWorkspace(v domain.Workspace) error {
 		if _, e := fix.ParseDictionary([]byte(d.XML)); e != nil {
 			return fmt.Errorf("字典 %s: %w", d.Name, e)
 		}
-		dicts[d.ID] = true
 	}
 	for _, f := range v.Functions {
 		if e := add(f.ID); e != nil {
@@ -140,9 +139,11 @@ func validateWorkspace(v domain.Workspace) error {
 			return fmt.Errorf("主机名格式无效")
 		}
 		if s.Protocol == "fix" {
-			if !dicts[s.DictionaryID] {
-				return fmt.Errorf("FIX 服务未绑定有效字典")
+			d, err := serviceDictionary(v, s)
+			if err != nil {
+				return err
 			}
+			definitions[s.ID] = d
 			if s.Sender == "" || s.Target == "" || strings.ContainsAny(s.Sender+s.Target, "\x01|\r\n") {
 				return fmt.Errorf("Sender/Target 无效")
 			}
@@ -178,6 +179,17 @@ func validateWorkspace(v domain.Workspace) error {
 		}
 		if !checkFn(r.RequestFunctionID, "request") || !checkFn(r.ResponseFunctionID, "response") {
 			return fmt.Errorf("请求关联函数类别不匹配")
+		}
+		if r.PeriodSeconds < 0 || r.PeriodSeconds > 3600 {
+			return fmt.Errorf("定时间隔必须为1到3600秒")
+		}
+		if r.MessageMode != "" && r.MessageMode != "form" && r.MessageMode != "text" {
+			return fmt.Errorf("未知报文编辑模式")
+		}
+		if r.CustomNodes != nil && definitions[r.ServiceID] != nil {
+			if _, err := r.Definition(definitions[r.ServiceID]); err != nil {
+				return err
+			}
 		}
 		if len(r.Data) > fix.MaxFrame || len(r.PreScript)+len(r.PostScript) > 512<<10 {
 			return fmt.Errorf("请求或脚本过大")
@@ -345,6 +357,25 @@ func (w *Workbench) Send(r domain.Request) error {
 	}
 	return s.Send(r)
 }
+func (w *Workbench) StartRepeat(r domain.Request, seconds int) error {
+	w.mu.Lock()
+	s := w.sessions[r.ServiceID]
+	exists := false
+	for _, saved := range w.workspace.Requests {
+		if saved.ID == r.ID && saved.ServiceID == r.ServiceID {
+			exists = true
+			break
+		}
+	}
+	w.mu.Unlock()
+	if !exists {
+		return fmt.Errorf("请先保存当前请求")
+	}
+	if s == nil {
+		return fmt.Errorf("请先连接服务")
+	}
+	return s.StartRepeat(r, seconds)
+}
 func (w *Workbench) StopTask(id, name string) {
 	w.mu.Lock()
 	s := w.sessions[id]
@@ -352,6 +383,28 @@ func (w *Workbench) StopTask(id, name string) {
 	if s != nil {
 		s.StopTask(name)
 	}
+}
+func eventSize(e domain.Event) int {
+	size := len(e.Raw) + len(e.Text) + len(e.Hex) + len(e.Base64)
+	if e.FIXDefinition != nil {
+		b, _ := json.Marshal(e.FIXDefinition)
+		size += len(b)
+	}
+	return size
+}
+func (w *Workbench) ClearRequestEvents(serviceID, requestID string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	kept := make([]domain.Event, 0, len(w.events))
+	w.eventBytes = 0
+	for _, e := range w.events {
+		if e.ServiceID == serviceID && e.RequestID == requestID {
+			continue
+		}
+		kept = append(kept, e)
+		w.eventBytes += eventSize(e)
+	}
+	w.events = kept
 }
 func (w *Workbench) ClearEvents() { w.mu.Lock(); w.events = nil; w.eventBytes = 0; w.mu.Unlock() }
 func (w *Workbench) Close() {

@@ -3,7 +3,10 @@ export interface DecodedRow { tag: number; name: string; value: string; descript
 // Preserve duplicate tags. Group paths are derived from dictionary order and delimiters.
 export function decodeFix(raw: string, dictionary?: Dictionary): DecodedRow[] {
   const fields = new Map(dictionary?.fields.map(f=>[f.number,f])||[])
-  const pairs=raw.split('\x01').filter(Boolean).map(s=>{const i=s.indexOf('=');return {tag:Number(s.slice(0,i)),value:s.slice(i+1)}})
+  const pairs=raw.split(raw.includes('\x01')?'\x01':'|').filter(Boolean).map(s=>{const i=s.indexOf('=');return {tag:i>0?Number(s.slice(0,i)):0,value:i>0?s.slice(i+1):s}})
+  function metadata(nodes:FixNode[]){for(const n of nodes){if(n.number&&!fields.has(n.number))fields.set(n.number,n);if(n.children)metadata(n.children)}}
+  metadata(dictionary?.header||[]);metadata(dictionary?.trailer||[]);for(const m of dictionary?.messages||[])metadata(m.nodes)
+
   const paths=new Map<number,string>()
   const type=pairs.find(p=>p.tag===35)?.value
   const schema=dictionary?.messages.find(m=>m.type===type)
@@ -30,8 +33,8 @@ export function decodeFix(raw: string, dictionary?: Dictionary): DecodedRow[] {
     return index
   }
   if(schema){
-    const roots=new Map(flattened(schema.nodes).map(n=>[n.number,n]))
+    const roots=new Map(flattened([...(dictionary?.header||[]),...schema.nodes,...(dictionary?.trailer||[])]).map(n=>[n.number,n]))
     for(let i=0;i<pairs.length;){const n=roots.get(pairs[i]!.tag);i=n?.kind==='group'?group(n,i,''):i+1}
   }
-  return pairs.map((p,index)=>{const f=fields.get(p.tag);return {tag:p.tag,name:f?.name||'未知字段',value:p.value,description:f?.enums?.find(e=>e.value===p.value)?.description||'',path:paths.get(index)||''}})
+  return pairs.map((p,index)=>{const f=fields.get(p.tag);return {tag:p.tag,name:f?.name||'未知字段',value:p.value,description:!f?'当前协议未定义此Tag；原始字段已保留':p.value.split(f.type?.startsWith('MULTIPLE')?' ':'\0').map(v=>f.enums?.find(e=>e.value===v)?.description||'').filter(Boolean).join(' / '),path:paths.get(index)||''}})
 }

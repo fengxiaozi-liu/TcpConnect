@@ -2,6 +2,7 @@ package application_test
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -182,9 +183,28 @@ func TestSelectedMessagesOnlyAndInvalidSelectionsAreAtomic(t *testing.T) {
 	}
 	svc := v.Services[0]
 	svc.ID = "selected-service"
-	if _, err = app.SaveService(svc, nil); err == nil {
-		t.Fatal("new FIX service accepted no selection")
+	beforeRequests := len(v.Requests)
+	if count, err := app.SaveService(svc, nil); err != nil || count != 0 {
+		t.Fatalf("saving service alone failed: %d %v", count, err)
 	}
+	saved := app.Snapshot(0).Workspace
+	if len(saved.Services) != 2 || len(saved.Dictionaries) != 1 || len(saved.Requests) != beforeRequests {
+		t.Fatal("saving service imported a dictionary or generated messages")
+	}
+	reopened, err := repo.Load()
+	if err != nil || len(reopened.Services) != 2 || len(reopened.Requests) != beforeRequests {
+		t.Fatalf("service-only save not persisted: %v", err)
+	}
+	invalid := svc
+	invalid.ID = "missing-dictionary-service"
+	invalid.DictionaryID = "missing"
+	if _, err := app.SaveService(invalid, nil); err == nil {
+		t.Fatal("service without a valid dictionary accepted")
+	}
+	if len(app.Snapshot(0).Workspace.Services) != 2 {
+		t.Fatal("invalid service left partial data")
+	}
+	svc.ID = "selected-service-with-template"
 	if count, err := app.SaveService(svc, []string{"0"}); err != nil || count != 1 {
 		t.Fatalf("new service selected templates: %d %v", count, err)
 	}
@@ -206,5 +226,75 @@ func TestSelectedMessagesOnlyAndInvalidSelectionsAreAtomic(t *testing.T) {
 	}
 	if len(app.Snapshot(0).Workspace.Requests) != 4 {
 		t.Fatal("unselected templates added")
+	}
+}
+
+func TestBuiltinServicesNeedNoImportedDictionary(t *testing.T) {
+	repo, err := storage.Open(filepath.Join(t.TempDir(), "workspace.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := application.New(repo, runtime.Factory{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	for minor := 0; minor <= 4; minor++ {
+		version := fmt.Sprintf("FIX.4.%d", minor)
+		svc := domain.Service{ID: version, Name: version, Protocol: "fix", FIXVersion: version, Host: "127.0.0.1", Port: 9878, Sender: "CLIENT", Target: "SERVER", Heartbeat: 30}
+		if count, err := app.SaveService(svc, nil); err != nil || count != 0 {
+			t.Fatalf("builtin save: %d %v", count, err)
+		}
+		d, err := app.ServiceDictionary(svc.ID)
+		if err != nil || d.Version != version {
+			t.Fatalf("service protocol: %v", err)
+		}
+		r, err := app.CreateMessage(svc.ID, "A")
+		if err != nil || r.Values["HeartBtInt"] != "30" {
+			t.Fatalf("builtin form: %v", err)
+		}
+		if count, err := app.GenerateMessages(svc.ID, []string{"0", "A"}); err != nil || count != 1 {
+			t.Fatalf("builtin supplement: %d %v", count, err)
+		}
+	}
+	v, err := repo.Load()
+	if err != nil || len(v.Services) != 5 || len(v.Requests) != 10 || len(v.Dictionaries) != 0 {
+		t.Fatalf("builtin persistence: %v", err)
+	}
+	svc := v.Services[0]
+	svc.ID = "bad-version"
+	svc.FIXVersion = "FIX.5.0"
+	if _, err := app.SaveService(svc, nil); err == nil {
+		t.Fatal("unsupported version accepted")
+	}
+	svc.ID = "missing-version"
+	svc.FIXVersion = ""
+	if _, err := app.SaveService(svc, nil); err == nil {
+		t.Fatal("missing version accepted")
+	}
+}
+
+func TestImportedProtocolVersionComesFromXMLRoot(t *testing.T) {
+	repo, err := storage.Open(filepath.Join(t.TempDir(), "workspace.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := application.New(repo, runtime.Factory{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	xml := `<fix major='4' type='FIX' servicepack='0' minor='2'><messages><message name='Heartbeat' msgtype='0'/></messages></fix>`
+	id, err := app.ImportProtocol("MISLEADING-FIX44.xml", xml, []string{"0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := app.Snapshot(0).Workspace
+	if len(v.Services) != 1 || v.Services[0].FIXVersion != "FIX.4.2" {
+		t.Fatal("filename overrode XML version")
+	}
+	d, err := app.ServiceDictionary(id)
+	if err != nil || d.Version != "FIX.4.2" {
+		t.Fatalf("wrong imported version: %v", err)
 	}
 }

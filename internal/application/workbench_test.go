@@ -63,7 +63,8 @@ func (s *fakeSession) Close()                    { s.closed.Store(true) }
 func (s *fakeSession) State() domain.SessionState {
 	return domain.SessionState{Connected: !s.closed.Load()}
 }
-func (s *fakeSession) StopTask(string) {}
+func (s *fakeSession) StartRepeat(domain.Request, int) error { return nil }
+func (s *fakeSession) StopTask(string)                       {}
 
 func TestDisconnectCancelsLateConnection(t *testing.T) {
 	repo, err := storage.Open(filepath.Join(t.TempDir(), "workspace.db"))
@@ -96,5 +97,34 @@ func TestDisconnectCancelsLateConnection(t *testing.T) {
 	}
 	if !f.session.closed.Load() || len(app.Status(0).Sessions) != 0 {
 		t.Fatal("late connection leaked")
+	}
+}
+
+func TestClearRequestEventsPreservesOtherRequestsAndConnections(t *testing.T) {
+	repo, err := storage.Open(filepath.Join(t.TempDir(), "workspace.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := application.New(repo, runtime.Factory{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	for _, e := range []domain.Event{{ServiceID: "one", RequestID: "A", Kind: "message"}, {ServiceID: "one", RequestID: "B", Kind: "message"}, {ServiceID: "one", Kind: "message"}, {ServiceID: "two", RequestID: "A", Kind: "message"}} {
+		app.Emit(e)
+	}
+	app.ClearRequestEvents("one", "A")
+	remaining := app.Status(0).Events
+	if len(remaining) != 3 {
+		t.Fatalf("cleared unrelated history: %v", remaining)
+	}
+	app.ClearRequestEvents("one", "")
+	remaining = app.Status(0).Events
+	if len(remaining) != 2 || remaining[0].RequestID != "B" || remaining[1].ServiceID != "two" {
+		t.Fatal("cleared unrelated session")
+	}
+	app.Emit(domain.Event{ServiceID: "one", RequestID: "A", Kind: "message"})
+	if len(app.Status(4).Events) != 1 {
+		t.Fatal("event cursor reset after clear")
 	}
 }

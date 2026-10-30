@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"tcpconnect/internal/domain/fix"
+	"time"
+)
 
 type Service struct {
 	ID              string `json:"id"`
@@ -9,6 +12,7 @@ type Service struct {
 	Host            string `json:"host"`
 	Port            int    `json:"port"`
 	TimeoutMS       int    `json:"timeoutMs"`
+	FIXVersion      string `json:"fixVersion"`
 	DictionaryID    string `json:"dictionaryId"`
 	Framing         string `json:"framing"`
 	Delimiter       string `json:"delimiter"`
@@ -24,6 +28,11 @@ type Service struct {
 }
 
 type Request struct {
+	DraftFromForm      bool           `json:"draftFromForm,omitempty"`
+	PeriodSeconds      int            `json:"periodSeconds,omitempty"`
+	Description        string         `json:"description,omitempty"`
+	CustomNodes        *[]fix.Node    `json:"customNodes,omitempty"`
+	MessageMode        string         `json:"messageMode,omitempty"`
 	ID                 string         `json:"id"`
 	ServiceID          string         `json:"serviceId"`
 	Name               string         `json:"name"`
@@ -60,24 +69,40 @@ type Workspace struct {
 }
 
 type Event struct {
-	ID        uint64    `json:"id"`
-	Time      time.Time `json:"time"`
-	ServiceID string    `json:"serviceId"`
-	Kind      string    `json:"kind"`
-	Direction string    `json:"direction,omitempty"`
-	Text      string    `json:"text"`
-	Raw       string    `json:"raw,omitempty"`
-	Hex       string    `json:"hex,omitempty"`
-	Base64    string    `json:"base64,omitempty"`
-	Size      int       `json:"size,omitempty"`
+	RequestID     string          `json:"requestId,omitempty"`
+	FIXDefinition *fix.Dictionary `json:"fixDefinition,omitempty"`
+	ID            uint64          `json:"id"`
+	Time          time.Time       `json:"time"`
+	ServiceID     string          `json:"serviceId"`
+	Kind          string          `json:"kind"`
+	Direction     string          `json:"direction,omitempty"`
+	Text          string          `json:"text"`
+	Raw           string          `json:"raw,omitempty"`
+	Hex           string          `json:"hex,omitempty"`
+	Base64        string          `json:"base64,omitempty"`
+	Size          int             `json:"size,omitempty"`
 }
 
+type HeartbeatState struct {
+	Status          string     `json:"status"`
+	IntervalSeconds int        `json:"intervalSeconds"`
+	LastSentAt      *time.Time `json:"lastSentAt,omitempty"`
+}
+type TaskState struct {
+	Name        string `json:"name"`
+	Kind        string `json:"kind"`
+	RequestID   string `json:"requestId,omitempty"`
+	RequestName string `json:"requestName,omitempty"`
+	IntervalMS  int64  `json:"intervalMs"`
+}
 type SessionState struct {
-	Connected   bool     `json:"connected"`
-	LoggedOn    bool     `json:"loggedOn"`
-	NextSeq     int      `json:"nextSeq"`
-	ExpectedSeq int      `json:"expectedSeq"`
-	Tasks       []string `json:"tasks"`
+	Heartbeat   *HeartbeatState `json:"heartbeat,omitempty"`
+	TaskDetails []TaskState     `json:"taskDetails"`
+	Connected   bool            `json:"connected"`
+	LoggedOn    bool            `json:"loggedOn"`
+	NextSeq     int             `json:"nextSeq"`
+	ExpectedSeq int             `json:"expectedSeq"`
+	Tasks       []string        `json:"tasks"`
 }
 
 type Repository interface {
@@ -88,6 +113,7 @@ type Repository interface {
 
 type Session interface {
 	Send(Request) error
+	StartRepeat(Request, int) error
 	Close()
 	State() SessionState
 	StopTask(string)

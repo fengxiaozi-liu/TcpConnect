@@ -12,6 +12,17 @@ import (
 const SOH = "\x01"
 const MaxFrame = 4 << 20
 
+var supportedVersions = [...]string{"FIX.4.0", "FIX.4.1", "FIX.4.2", "FIX.4.3", "FIX.4.4"}
+
+func SupportsVersion(version string) bool {
+	for _, v := range supportedVersions {
+		if version == v {
+			return true
+		}
+	}
+	return false
+}
+
 func Validate(n Node, v string) error {
 	bad := func() error { return fmt.Errorf("字段 %s (%d) 的值不符合 %s", n.Name, n.Number, n.Type) }
 	if strings.ContainsAny(v, "\x01\r\n") {
@@ -47,7 +58,7 @@ func Validate(n Node, v string) error {
 		if n.Type != "INT" && i < 0 {
 			return bad()
 		}
-	case "FLOAT", "QTY", "PRICE", "PRICEOFFSET", "AMT", "PERCENTAGE":
+	case "FLOAT", "QTY", "QUANTITY", "PRICE", "PRICEOFFSET", "AMT", "PERCENTAGE":
 		if _, ok := new(big.Rat).SetString(v); !ok || strings.Contains(v, "/") {
 			return bad()
 		}
@@ -59,11 +70,11 @@ func Validate(n Node, v string) error {
 		if len([]rune(v)) != 1 {
 			return bad()
 		}
-	case "UTCTIMESTAMP":
+	case "UTCTIMESTAMP", "TIME":
 		if _, e := time.Parse("20060102-15:04:05", v); e != nil {
 			return bad()
 		}
-	case "UTCDATEONLY", "LOCALMKTDATE":
+	case "UTCDATEONLY", "UTCDATE", "DATE", "LOCALMKTDATE":
 		if _, e := time.Parse("20060102", v); e != nil {
 			return bad()
 		}
@@ -75,14 +86,19 @@ func Validate(n Node, v string) error {
 	return nil
 }
 
-func Encode(msgType, sender, target string, seq int, body []Pair, now time.Time) []byte {
+// Encode uses the version validated when the session's dictionary is loaded.
+func Encode(version, msgType, sender, target string, seq int, body []Pair, now time.Time) []byte {
 	ps := []Pair{{35, msgType}, {49, sender}, {56, target}, {34, strconv.Itoa(seq)}}
 	for _, p := range body {
 		if p.Tag == 43 {
 			ps = append(ps, p)
 		}
 	}
-	ps = append(ps, Pair{52, now.UTC().Format("20060102-15:04:05.000")})
+	layout := "20060102-15:04:05.000"
+	if version == "FIX.4.0" || version == "FIX.4.1" {
+		layout = "20060102-15:04:05"
+	}
+	ps = append(ps, Pair{52, now.UTC().Format(layout)})
 	for _, p := range body {
 		if p.Tag == 122 {
 			ps = append(ps, p)
@@ -97,7 +113,7 @@ func Encode(msgType, sender, target string, seq int, body []Pair, now time.Time)
 	for _, p := range ps {
 		fmt.Fprintf(&b, "%d=%s%s", p.Tag, p.Value, SOH)
 	}
-	raw := fmt.Sprintf("8=FIX.4.4%s9=%d%s%s", SOH, b.Len(), SOH, b.String())
+	raw := fmt.Sprintf("8=%s%s9=%d%s%s", version, SOH, b.Len(), SOH, b.String())
 	sum := 0
 	for _, c := range []byte(raw) {
 		sum = (sum + int(c)) % 256
@@ -110,19 +126,20 @@ func FrameLength(data []byte) (int, error) {
 	if len(data) > MaxFrame {
 		return 0, fmt.Errorf("FIX 接收缓冲超过 4 MiB")
 	}
-	if len(data) < len("8=FIX.4.4\x01") {
-		if !bytes.HasPrefix([]byte("8=FIX.4.4\x01"), data) {
-			return 0, fmt.Errorf("FIX 报文头无效")
-		}
-		return 0, nil
-	}
-	if !bytes.HasPrefix(data, []byte("8=FIX.4.4\x019=")) {
-		if len(data) < 12 {
+	start := 0
+	for _, version := range supportedVersions {
+		prefix := []byte("8=" + version + SOH + "9=")
+		if len(data) < len(prefix) && bytes.HasPrefix(prefix, data) {
 			return 0, nil
 		}
-		return 0, fmt.Errorf("FIX 必须以 8=FIX.4.4、9= 开头")
+		if bytes.HasPrefix(data, prefix) {
+			start = len(prefix)
+			break
+		}
 	}
-	start := len("8=FIX.4.4\x019=")
+	if start == 0 {
+		return 0, fmt.Errorf("FIX 必须以支持的 8=FIX.4.0～FIX.4.4、9= 开头")
+	}
 	end := bytes.IndexByte(data[start:], 1)
 	if end < 0 {
 		if len(data) > 40 {

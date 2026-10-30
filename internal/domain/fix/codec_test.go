@@ -54,7 +54,7 @@ func TestImportedDictionary(t *testing.T) {
 }
 
 func TestByteFraming(t *testing.T) {
-	raw := Encode("0", "CLIENT", "SERVER", 2, []Pair{{112, "测试"}}, time.Now())
+	raw := Encode("FIX.4.4", "0", "CLIENT", "SERVER", 2, []Pair{{112, "测试"}}, time.Now())
 	n, e := FrameLength(raw)
 	if e != nil || n != len(raw) {
 		t.Fatalf("%d %v", n, e)

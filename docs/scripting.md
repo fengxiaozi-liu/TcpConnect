@@ -54,7 +54,9 @@ if (!vars.get("heartbeatStarted")) {
 }
 ```
 
-`timers.setInterval(name, milliseconds, callback)` 循环执行；`timers.setTimeout` 执行一次；`timers.clear(name)` 停止。同名任务替换，至少 50ms，最多 32 个。全局 setInterval/setTimeout/clearInterval/clearTimeout 支持标准参数形式，返回可清理的任务名称。回调捕获创建时请求的处理配置，避免切换请求导致定时器使用错误函数。
+`timers.setInterval(name, milliseconds, callback)` 循环执行；`timers.setTimeout` 执行一次；`timers.clear(name)` 停止。同名任务替换，至少 50ms，与界面请求周期任务合计最多 32 个；`request/` 名称前缀保留给界面任务。全局 setInterval/setTimeout/clearInterval/clearTimeout 支持标准参数形式，返回可清理的任务名称。回调捕获创建时请求的处理配置，避免切换请求导致定时器使用错误函数。
+
+也可直接在“定时任务”页设置1～3600秒并启动当前请求，无需编写后置脚本。首条在一个间隔后发送，使用启动时快照，执行完整手动发送流程（包括前置脚本）；失败停止、断开清理，重连不自动恢复。FIX管理模式需要先登录。FIX内置自动心跳的状态和最近发送时间在该页单独显示，不占用上述32个任务名额。
 
 FIX 会话内置心跳，不需要再用脚本发送第二套心跳。脚本定时器可用于周期业务请求：
 

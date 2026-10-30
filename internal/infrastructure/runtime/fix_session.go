@@ -46,6 +46,9 @@ func (s *Session) receiveFIX(raw []byte) error {
 	if e != nil {
 		return e
 	}
+	if version := fix.Get(ps, 8); version != s.dictionary.Version {
+		return fmt.Errorf("FIX 版本与绑定字典不匹配: 收到 %s，期望 %s", version, s.dictionary.Version)
+	}
 	if fix.Get(ps, 49) != s.opts.Service.Target || fix.Get(ps, 56) != s.opts.Service.Sender {
 		return fmt.Errorf("FIX Sender/Target 与会话不匹配")
 	}
@@ -86,7 +89,7 @@ func (s *Session) receiveFIX(raw []byte) error {
 		}
 		s.opts.Service.Heartbeat = interval
 		s.loggedOn = true
-		s.emit("connection", "FIX 已登录，自动维护心跳与序号")
+		s.emit("connection", s.dictionary.Version+" 已登录，自动维护心跳与序号")
 	case "0":
 		if fix.Get(ps, 112) == s.awaitingTest {
 			s.awaitingTest = ""
@@ -132,14 +135,14 @@ func (s *Session) receiveFIX(raw []byte) error {
 			pairs, _ := fix.Pairs(b)
 			mt := fix.Get(pairs, 35)
 			if mt == "A" || mt == "0" || mt == "1" || mt == "2" || mt == "3" || mt == "4" || mt == "5" {
-				gap := fix.Encode("4", s.opts.Service.Sender, s.opts.Service.Target, i, []fix.Pair{{Tag: 43, Value: "Y"}, {Tag: 123, Value: "Y"}, {Tag: 36, Value: strconv.Itoa(i + 1)}}, time.Now())
+				gap := fix.Encode(s.dictionary.Version, "4", s.opts.Service.Sender, s.opts.Service.Target, i, []fix.Pair{{Tag: 43, Value: "Y"}, {Tag: 123, Value: "Y"}, {Tag: 36, Value: strconv.Itoa(i + 1)}}, time.Now())
 				if e = s.write(gap); e != nil {
 					return e
 				}
 			} else {
 				body := []fix.Pair{{Tag: 43, Value: "Y"}, {Tag: 122, Value: fix.Get(pairs, 52)}}
 				body = append(body, fix.BodyPairs(pairs)...)
-				if e = s.write(fix.Encode(mt, s.opts.Service.Sender, s.opts.Service.Target, i, body, time.Now())); e != nil {
+				if e = s.write(fix.Encode(s.dictionary.Version, mt, s.opts.Service.Sender, s.opts.Service.Target, i, body, time.Now())); e != nil {
 					return e
 				}
 			}

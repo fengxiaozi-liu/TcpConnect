@@ -20,8 +20,14 @@ func (b *Bridge) Save(workspace domain.Workspace) error   { return b.Workbench.S
 func (b *Bridge) Connect(id string) error                 { return b.Workbench.Connect(id) }
 func (b *Bridge) Disconnect(id string)                    { b.Workbench.Disconnect(id) }
 func (b *Bridge) Send(request domain.Request) error       { return b.Workbench.Send(request) }
-func (b *Bridge) StopTask(id, name string)                { b.Workbench.StopTask(id, name) }
-func (b *Bridge) ClearEvents()                            { b.Workbench.ClearEvents() }
+func (b *Bridge) StartRepeat(request domain.Request, seconds int) error {
+	return b.Workbench.StartRepeat(request, seconds)
+}
+func (b *Bridge) StopTask(id, name string) { b.Workbench.StopTask(id, name) }
+func (b *Bridge) ClearRequestEvents(serviceID, requestID string) {
+	b.Workbench.ClearRequestEvents(serviceID, requestID)
+}
+func (b *Bridge) ClearEvents() { b.Workbench.ClearEvents() }
 func (b *Bridge) ImportDictionary(name, xml string) (*fix.Dictionary, error) {
 	return b.Workbench.ImportDictionary(name, xml)
 }
@@ -39,6 +45,9 @@ func (b *Bridge) GenerateMessages(id string, types []string) (int, error) {
 }
 func (b *Bridge) CreateMessage(id, msgType string) (domain.Request, error) {
 	return b.Workbench.CreateMessage(id, msgType)
+}
+func (b *Bridge) BuiltinDictionary(version string) (*fix.Dictionary, error) {
+	return fix.ResolveDictionary(version, nil)
 }
 func (b *Bridge) Dictionary(id string) (*fix.Dictionary, error) { return b.Workbench.Dictionary(id) }
 func (b *Bridge) Export() (string, error)                       { return b.Workbench.Export() }
@@ -58,11 +67,11 @@ func (b *Bridge) Preview(r domain.Request) (string, error) {
 	if svc.Protocol != "fix" || r.RawMode {
 		return r.Data, nil
 	}
-	d, e := b.Workbench.Dictionary(svc.DictionaryID)
+	d, e := b.Workbench.ServiceDictionary(svc.ID)
 	if e != nil {
 		return "", e
 	}
-	ps, e := d.Body(r.MessageType, r.Values)
+	ps, e := r.Body(d)
 	if e != nil {
 		return "", e
 	}
@@ -70,7 +79,7 @@ func (b *Bridge) Preview(r domain.Request) (string, error) {
 	if s, ok := state.Sessions[svc.ID]; ok {
 		seq = s.NextSeq
 	}
-	return strings.ReplaceAll(string(fix.Encode(r.MessageType, svc.Sender, svc.Target, seq, ps, time.Now())), fix.SOH, "|"), nil
+	return strings.ReplaceAll(string(fix.Encode(d.Version, r.MessageType, svc.Sender, svc.Target, seq, ps, time.Now())), fix.SOH, "|"), nil
 }
 
 // Handler exposes only named use cases. It requires same-origin JSON POSTs.
@@ -164,6 +173,14 @@ func (b *Bridge) Handler(assets fs.FS, host string) http.Handler {
 					result, err = b.Preview(req)
 				}
 			}
+		case "StartRepeat":
+			var seconds int
+			if err = arg(0, &req); err == nil {
+				err = arg(1, &seconds)
+			}
+			if err == nil {
+				err = b.StartRepeat(req, seconds)
+			}
 		case "StopTask":
 			if err = arg(0, &id); err == nil {
 				err = arg(1, &name)
@@ -171,8 +188,19 @@ func (b *Bridge) Handler(assets fs.FS, host string) http.Handler {
 			if err == nil {
 				b.StopTask(id, name)
 			}
+		case "ClearRequestEvents":
+			if err = arg(0, &id); err == nil {
+				err = arg(1, &name)
+			}
+			if err == nil {
+				b.ClearRequestEvents(id, name)
+			}
 		case "ClearEvents":
 			b.ClearEvents()
+		case "BuiltinDictionary":
+			if err = arg(0, &name); err == nil {
+				result, err = b.BuiltinDictionary(name)
+			}
 		case "Dictionary":
 			if err = arg(0, &id); err == nil {
 				result, err = b.Dictionary(id)

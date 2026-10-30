@@ -18,8 +18,10 @@ import (
 
 type Factory struct{}
 type task struct {
-	stop    chan struct{}
-	request domain.Request
+	kind       string
+	intervalMS int64
+	stop       chan struct{}
+	request    domain.Request
 }
 type Session struct {
 	mu                  sync.Mutex
@@ -34,6 +36,7 @@ type Session struct {
 	vars                map[string]any
 	active              domain.Request
 	lastWrite, lastRead time.Time
+	lastHeartbeat       time.Time
 	journal             map[int][]byte
 	journalBytes        int
 	pending             map[int][]byte
@@ -41,6 +44,7 @@ type Session struct {
 	requestedGap        int
 	awaitingTest        string
 	testSent            time.Time
+	outbound            []requestContext
 	sendDepth           int
 }
 
@@ -55,7 +59,7 @@ func (Factory) Connect(opts domain.SessionOptions) (domain.Session, error) {
 	var d *fix.Dictionary
 	var e error
 	if opts.Service.Protocol == "fix" {
-		d, e = fix.ParseDictionary([]byte(opts.Dictionary.XML))
+		d, e = fix.ResolveDictionary(opts.Service.FIXVersion, []byte(opts.Dictionary.XML))
 		if e != nil {
 			return nil, e
 		}
@@ -74,15 +78,21 @@ func (Factory) Connect(opts domain.SessionOptions) (domain.Session, error) {
 	}
 	s.emit("connection", "TCP 已连接 "+c.RemoteAddr().String())
 	if d != nil && opts.Service.AutoLogon {
-		body := []fix.Pair{{Tag: 98, Value: "0"}, {Tag: 108, Value: strconv.Itoa(opts.Service.Heartbeat)}}
+		values := map[string]any{"EncryptMethod": "0", "HeartBtInt": strconv.Itoa(opts.Service.Heartbeat)}
 		if opts.Service.ResetOnLogon {
-			body = append(body, fix.Pair{Tag: 141, Value: "Y"})
+			values["ResetSeqNumFlag"] = "Y"
 		}
 		if opts.Service.Username != "" {
-			body = append(body, fix.Pair{Tag: 553, Value: opts.Service.Username})
+			values["Username"] = opts.Service.Username
 		}
 		if opts.Service.Password != "" {
-			body = append(body, fix.Pair{Tag: 554, Value: opts.Service.Password})
+			values["Password"] = opts.Service.Password
+		}
+		// Serialize only fields declared by this dictionary's Logon message.
+		body, err := d.Body("A", values)
+		if err != nil {
+			s.closeLocked()
+			return nil, fmt.Errorf("自动登录: %w；可使用 Logon 表单填写必填字段后手动登录", err)
 		}
 		if e = s.sendAdmin("A", body); e != nil {
 			s.closeLocked()
@@ -96,10 +106,13 @@ func (Factory) Connect(opts domain.SessionOptions) (domain.Session, error) {
 	return s, nil
 }
 func (s *Session) emit(kind, text string) {
-	s.opts.Emit(domain.Event{ServiceID: s.opts.Service.ID, Kind: kind, Text: text})
+	s.opts.Emit(domain.Event{ServiceID: s.opts.Service.ID, RequestID: s.active.ID, Kind: kind, Text: text})
 }
 func (s *Session) record(direction string, b []byte, text string) {
-	s.opts.Emit(domain.Event{ServiceID: s.opts.Service.ID, Kind: "message", Direction: direction, Text: text, Raw: string(b), Hex: hex.EncodeToString(b), Base64: base64.StdEncoding.EncodeToString(b), Size: len(b)})
+	s.recordRequest(direction, b, text, domain.Request{})
+}
+func (s *Session) recordRequest(direction string, b []byte, text string, r domain.Request) {
+	s.opts.Emit(domain.Event{ServiceID: s.opts.Service.ID, RequestID: r.ID, FIXDefinition: s.eventDefinition(b, r), Kind: "message", Direction: direction, Text: text, Raw: string(b), Hex: hex.EncodeToString(b), Base64: base64.StdEncoding.EncodeToString(b), Size: len(b)})
 }
 func (s *Session) State() domain.SessionState {
 	s.mu.Lock()
@@ -109,7 +122,26 @@ func (s *Session) State() domain.SessionState {
 		tasks = append(tasks, n)
 	}
 	sort.Strings(tasks)
-	return domain.SessionState{Connected: s.connected, LoggedOn: s.loggedOn, NextSeq: s.seq, ExpectedSeq: s.expected, Tasks: tasks}
+	details := make([]domain.TaskState, 0, len(tasks))
+	for _, name := range tasks {
+		t := s.tasks[name]
+		details = append(details, domain.TaskState{Name: name, Kind: t.kind, RequestID: t.request.ID, RequestName: t.request.Name, IntervalMS: t.intervalMS})
+	}
+	state := domain.SessionState{Connected: s.connected, LoggedOn: s.loggedOn, NextSeq: s.seq, ExpectedSeq: s.expected, Tasks: tasks, TaskDetails: details}
+	if s.dictionary != nil {
+		status := "waiting_logon"
+		if !s.connected {
+			status = "disconnected"
+		} else if s.loggedOn {
+			status = "running"
+		}
+		state.Heartbeat = &domain.HeartbeatState{Status: status, IntervalSeconds: s.opts.Service.Heartbeat}
+		if !s.lastHeartbeat.IsZero() {
+			last := s.lastHeartbeat
+			state.Heartbeat.LastSentAt = &last
+		}
+	}
+	return state
 }
 func (s *Session) Close() { s.mu.Lock(); defer s.mu.Unlock(); s.closeLocked() }
 func (s *Session) closeLocked() {
@@ -130,7 +162,10 @@ func (s *Session) stopTask(name string) {
 	if t, ok := s.tasks[name]; ok {
 		close(t.stop)
 		delete(s.tasks, name)
+		previous := s.active
+		s.active = t.request
 		s.emit("task", "停止定时任务: "+name)
+		s.active = previous
 	}
 }
 func (s *Session) run(work func() error) error {
@@ -226,19 +261,24 @@ func valueBytes(v goja.Value) ([]byte, error) {
 func (s *Session) Send(r domain.Request) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.sendLocked(r)
+}
+func (s *Session) sendLocked(r domain.Request) error {
 	if !s.connected {
 		return fmt.Errorf("连接已断开")
 	}
+	previous := s.active
 	s.active = r
+	defer func() { s.active = previous }()
 	err := s.run(func() error {
 		var b []byte
 		var e error
 		if s.dictionary != nil && !r.RawMode {
-			ps, err := s.dictionary.Body(r.MessageType, r.Values)
+			ps, err := r.Body(s.dictionary)
 			if err != nil {
 				return err
 			}
-			b = fix.Encode(r.MessageType, s.opts.Service.Sender, s.opts.Service.Target, s.seq, ps, time.Now())
+			b = fix.Encode(s.dictionary.Version, r.MessageType, s.opts.Service.Sender, s.opts.Service.Target, s.seq, ps, time.Now())
 		} else {
 			switch r.Encoding {
 			case "hex":
@@ -309,18 +349,20 @@ func (s *Session) sendData(b []byte, r domain.Request, managed bool) error {
 			s.pending = map[int][]byte{}
 			s.pendingBytes = 0
 			s.requestedGap = 0
+			s.outbound = nil
 		}
-		b = fix.Encode(typ, s.opts.Service.Sender, s.opts.Service.Target, s.seq, fix.BodyPairs(ps), time.Now())
-		if e = s.write(b); e != nil {
+		b = fix.Encode(s.dictionary.Version, typ, s.opts.Service.Sender, s.opts.Service.Target, s.seq, fix.BodyPairs(ps), time.Now())
+		if e = s.writeRequest(b, r); e != nil {
 			return e
 		}
 		s.remember(s.seq, b)
 		s.seq++
 		return nil
 	}
-	return s.write(b)
+	return s.writeRequest(b, r)
 }
-func (s *Session) write(b []byte) error {
+func (s *Session) write(b []byte) error { return s.writeRequest(b, domain.Request{}) }
+func (s *Session) writeRequest(b []byte, r domain.Request) error {
 	if !s.connected {
 		return fmt.Errorf("连接已断开")
 	}
@@ -342,7 +384,14 @@ func (s *Session) write(b []byte) error {
 		left = left[n:]
 	}
 	s.lastWrite = time.Now()
-	s.record("send", b, string(b))
+	if s.dictionary != nil {
+		ps, _ := fix.Pairs(b)
+		if fix.Get(ps, 35) == "0" {
+			s.lastHeartbeat = s.lastWrite
+		}
+	}
+	s.recordRequest("send", b, string(b), r)
+	s.trackRequest(b, r)
 	return nil
 }
 func (s *Session) remember(seq int, b []byte) {
@@ -364,7 +413,7 @@ func (s *Session) remember(seq int, b []byte) {
 	}
 }
 func (s *Session) sendAdmin(typ string, body []fix.Pair) error {
-	b := fix.Encode(typ, s.opts.Service.Sender, s.opts.Service.Target, s.seq, body, time.Now())
+	b := fix.Encode(s.dictionary.Version, typ, s.opts.Service.Sender, s.opts.Service.Target, s.seq, body, time.Now())
 	if e := s.write(b); e != nil {
 		return e
 	}
@@ -491,13 +540,16 @@ func (s *Session) frameLength(b []byte) (int, error) {
 	}
 }
 func (s *Session) receive(b []byte) error {
-	r := s.active
+	r := s.matchRequest(b)
+	previous := s.active
+	s.active = r
+	defer func() { s.active = previous }()
 	shown, e := s.transform(r.ResponseFunctionID, b)
 	if e != nil {
 		s.emit("error", "返回处理函数: "+e.Error())
 		shown = b
 	}
-	s.record("receive", b, string(shown))
+	s.recordRequest("receive", b, string(shown), r)
 	if s.dictionary != nil {
 		if e = s.receiveFIX(b); e != nil {
 			return e

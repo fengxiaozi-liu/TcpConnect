@@ -32,11 +32,12 @@ func main() {
 func serve(c net.Conn) {
 	defer c.Close()
 	seq := 1
+	version := ""
 	buffer := []byte{}
 	chunk := make([]byte, 32768)
 	send := func(typ string, body []fix.Pair) error {
 		_ = c.SetWriteDeadline(time.Now().Add(2 * time.Second))
-		raw := fix.Encode(typ, "Fix", "FixClient", seq, body, time.Now())
+		raw := fix.Encode(version, typ, "Fix", "FixClient", seq, body, time.Now())
 		seq++
 		_, e := io.Copy(c, bytes.NewReader(raw))
 		return e
@@ -61,10 +62,19 @@ func serve(c net.Conn) {
 			if e != nil {
 				return
 			}
+			if version == "" {
+				version = fix.Get(ps, 8)
+			} else if fix.Get(ps, 8) != version {
+				return
+			}
 			switch fix.Get(ps, 35) {
 			case "A":
 				seq = 1
-				e = send("A", []fix.Pair{{Tag: 98, Value: "0"}, {Tag: 108, Value: "30"}, {Tag: 141, Value: "Y"}})
+				body := []fix.Pair{{Tag: 98, Value: "0"}, {Tag: 108, Value: "30"}}
+				if version != "FIX.4.0" {
+					body = append(body, fix.Pair{Tag: 141, Value: "Y"})
+				}
+				e = send("A", body)
 			case "0":
 				e = send("0", nil)
 			case "1":

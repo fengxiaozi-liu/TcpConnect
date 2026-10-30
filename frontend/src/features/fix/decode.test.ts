@@ -17,3 +17,13 @@ describe('FIX dictionary rendering data',()=>{
     expect(result.filter(r=>r.tag===101).map(r=>r.path)).toEqual(['Rows[1].','Rows[2].'])
   })
 })
+
+it('decodes pipe input from effective schema, multiple enums, malformed and unknown fields',()=>{
+ const dictionary={fields:[],messages:[{type:'U',nodes:[{kind:'field',name:'Choices',number:9001,type:'MULTIPLECHARVALUE',enums:[{value:'A',description:'Alpha'},{value:'B',description:'Beta'}]}]}]} as unknown as Dictionary
+ const rows=decodeFix('35=U|9001=A B|9002=x=y|broken|',dictionary)
+ expect(rows).toHaveLength(4)
+ expect(rows[1]).toMatchObject({name:'Choices',description:'Alpha / Beta'})
+ expect(rows[2]).toMatchObject({tag:9002,value:'x=y',name:'未知字段'})
+ expect(rows[2]?.description).toContain('已保留')
+ expect(rows[3]).toMatchObject({tag:0,value:'broken'})
+})

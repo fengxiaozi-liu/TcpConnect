@@ -17,13 +17,14 @@ type Field struct {
 	Enums  []Enum `xml:"value" json:"enums"`
 }
 type Node struct {
-	Kind     string `json:"kind"`
-	Name     string `json:"name"`
-	Required bool   `json:"required"`
-	Number   int    `json:"number,omitempty"`
-	Type     string `json:"type,omitempty"`
-	Enums    []Enum `json:"enums,omitempty"`
-	Children []Node `json:"children,omitempty"`
+	Description string `json:"description,omitempty"`
+	Kind        string `json:"kind"`
+	Name        string `json:"name"`
+	Required    bool   `json:"required"`
+	Number      int    `json:"number,omitempty"`
+	Type        string `json:"type,omitempty"`
+	Enums       []Enum `json:"enums,omitempty"`
+	Children    []Node `json:"children,omitempty"`
 }
 type Message struct {
 	Name     string `json:"name"`
@@ -74,10 +75,15 @@ func ParseDictionary(data []byte) (*Dictionary, error) {
 	if err := xml.Unmarshal(data, &root); err != nil {
 		return nil, fmt.Errorf("XML 解析失败: %w", err)
 	}
-	if root.Type != "FIX" || root.Major != "4" || root.Minor != "4" {
-		return nil, fmt.Errorf("当前支持 QuickFIX FIX.4.4 字典，收到 %s.%s.%s", root.Type, root.Major, root.Minor)
+	// Older QuickFIX dictionaries may omit type, whose default is FIX.
+	if root.Type == "" {
+		root.Type = "FIX"
 	}
-	d := &Dictionary{Version: root.Type + "." + root.Major + "." + root.Minor, Fields: root.Fields, ComponentCount: len(root.Components)}
+	version := root.Type + "." + root.Major + "." + root.Minor
+	if !SupportsVersion(version) {
+		return nil, fmt.Errorf("支持 QuickFIX FIX.4.0～FIX.4.4 字典，收到 %s；FIX 5.x/FIXT 会话暂不支持", version)
+	}
+	d := &Dictionary{Version: version, Fields: root.Fields, ComponentCount: len(root.Components)}
 	fields := map[string]Field{}
 	numbers := map[int]bool{}
 	components := map[string]ref{}
@@ -256,7 +262,12 @@ func (d *Dictionary) Body(msgType string, values map[string]any) ([]Pair, error)
 				continue
 			}
 			value := fmt.Sprint(x)
-			if err := Validate(n, value); err != nil {
+			validationNode := n
+			// In pre-4.2 dictionaries CHAR also describes strings such as Symbol and ClOrdID.
+			if (d.Version == "FIX.4.0" || d.Version == "FIX.4.1") && n.Type == "CHAR" {
+				validationNode.Type = "STRING"
+			}
+			if err := Validate(validationNode, value); err != nil {
 				return nil, err
 			}
 			out = append(out, Pair{n.Number, value})
