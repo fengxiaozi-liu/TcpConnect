@@ -8,6 +8,47 @@ async function editScript(page:any,tab:string,script:string){await page.getByRol
 async function chooseInterfaces(page:any,types?:string[]){const modal=page.locator('.message-picker');await expect(modal).toBeVisible();if(types){for(const name of types)await modal.getByRole('checkbox',{name,exact:true}).check()}else await modal.getByRole('button',{name:'全选当前结果',exact:true}).click();await modal.getByRole('button',{name:/^确认(导入|创建|添加)$/}).click();await expect(modal).not.toBeVisible()}
 
 
+test('editor wheel scrolls the page for short content and at long content boundaries',async({page})=>{
+  await page.setViewportSize({width:1440,height:800})
+  await page.goto('/')
+  await page.getByRole('complementary').getByRole('button',{name:'FIX 登录 Logon',exact:true}).click()
+  await page.getByRole('checkbox',{name:'原始报文',exact:true}).click()
+  const editor=page.locator('.request-editor-card .code-editor'),outer=page.locator('.workbench-scroll')
+  await expect(editor).toContainText('35=A')
+  const scroll=()=>outer.evaluate(el=>el.scrollTop)
+  await outer.evaluate(el=>el.scrollTop=0)
+  await editor.hover({position:{x:200,y:160}})
+  await page.mouse.wheel(0,200)
+  await expect.poll(scroll).toBeGreaterThan(0)
+  await editor.hover({position:{x:200,y:40}})
+  await page.mouse.wheel(0,-200)
+  await expect.poll(scroll).toBe(0)
+
+  const input=editor.locator('textarea')
+  await input.focus();await input.press('ControlOrMeta+A')
+  await page.keyboard.insertText(Array.from({length:100},(_,i)=>'58=scroll-'+i+'|').join('\n'))
+  const inner=editor.locator('.monaco-scrollable-element.editor-scrollable')
+  const viewTop=()=>editor.locator('.lines-content').evaluate(el=>parseFloat((el as HTMLElement).style.top)||0)
+  await input.press('ControlOrMeta+Home')
+  await outer.evaluate(el=>el.scrollTop=0)
+  await editor.hover({position:{x:200,y:160}})
+  await page.mouse.wheel(0,160)
+  await expect.poll(viewTop).toBeLessThan(0)
+  expect(await scroll()).toBe(0)
+  await expect(inner).toBeVisible()
+  await input.press('ControlOrMeta+End')
+  await outer.evaluate(el=>el.scrollTop=0)
+  await editor.hover({position:{x:200,y:160}})
+  await page.mouse.wheel(0,160)
+  await expect.poll(scroll).toBeGreaterThan(0)
+  await input.press('ControlOrMeta+Home')
+  await outer.evaluate(el=>el.scrollTop=150)
+  await editor.hover({position:{x:200,y:160}})
+  const previous=await scroll()
+  await page.mouse.wheel(0,-120)
+  await expect.poll(scroll).toBeLessThan(previous)
+})
+
 test('TCP current connection, scripts, timers and persistence',async({page})=>{
   const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message))
   const peers=new Set<net.Socket>();const server=net.createServer(c=>{peers.add(c);c.on('data',b=>c.write(b));c.on('close',()=>peers.delete(c))});server.listen(0,'127.0.0.1');await once(server,'listening');const port=(server.address() as net.AddressInfo).port
